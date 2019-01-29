@@ -16,17 +16,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var sessionInstances = make(map[string]*Session)
-
-var resistanceToSpies = map[int]int{
-	5:  2,
-	6:  2,
-	7:  3,
-	8:  3,
-	9:  3,
-	10: 4,
-}
-
 // rounds to number of players to number of team members to number of fails needed
 var roundRules = []map[int][]int{
 	{5: {2, 1}, 6: {2, 1}, 7: {2, 1}, 8: {3, 1}},
@@ -34,15 +23,6 @@ var roundRules = []map[int][]int{
 	{5: {2, 1}, 6: {4, 1}, 7: {3, 1}, 8: {4, 1}},
 	{5: {3, 1}, 6: {3, 1}, 7: {4, 2}, 8: {5, 2}},
 	{5: {3, 1}, 6: {4, 1}, 7: {4, 1}, 8: {5, 1}},
-}
-
-type Session struct {
-	ID      string
-	Admin   *Player
-	Setup   Setup
-	Roles   Roles
-	State   State
-	Players []*Player
 }
 
 type Message struct {
@@ -66,17 +46,6 @@ type Setup struct {
 	Morgana  bool `json:"morgana"`
 	Mordred  bool `json:"mordred"`
 	Oberon   bool `json:"oberon"`
-}
-
-type Roles struct {
-	Merlin   string
-	Percival string
-	Assassin string
-	Morgana  string
-	Mordred  string
-	Oberon   string
-	Rebels   []string
-	Spies    []string
 }
 
 type State struct {
@@ -160,7 +129,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 
 			session, err = clientPlayer.Host(connect.Session, connect.Name)
 			if err != nil {
-				log.Printf("Error unmarshalling host connect: %s", err)
+				log.Printf("Error hosting session by Player %s: %s", clientPlayer.ID, err)
 				return
 			}
 		} else if message.Type == "join" {
@@ -172,116 +141,27 @@ func client(w http.ResponseWriter, r *http.Request) {
 
 			session, err = clientPlayer.Join(connect.Session, connect.Name)
 			if err != nil {
-				log.Printf("Error unmarshalling host connect: %s", err)
+				log.Printf("Error joining session by Player %s: %s", clientPlayer.ID, err)
 				return
 			}
-		} else if message.Type == "setup" && session != nil && session.Admin == &clientPlayer {
+		} else if message.Type == "start" && session != nil && session.Admin == &clientPlayer {
 			if len(session.Players) < 5 {
 				websocket.WriteJSON(c, TextMessage{Type: "text", Text: "Need at least 5 players to start"})
 				continue
 			}
+
 			var setup Setup
 			err = json.Unmarshal(message.Data, &setup)
 			if err != nil {
 				log.Printf("Error unmarshalling setup: %s", err)
 			}
 
-			rand.Shuffle(len(session.Players), func(i, j int) {
-				session.Players[i], session.Players[j] = session.Players[j], session.Players[i]
-			})
-
-			var roles Roles
-
-			var knownSpies []string
-			for i, player := range session.Players {
-				if i < resistanceToSpies[len(session.Players)] {
-					if setup.Merlin == true && roles.Assassin == "" {
-						player.Role = "Assassin"
-						roles.Assassin = player.ID
-						knownSpies = append(knownSpies, player.ID)
-					} else if setup.Morgana == true && roles.Morgana == "" {
-						player.Role = "Morgana"
-						roles.Morgana = player.ID
-						knownSpies = append(knownSpies, player.ID)
-					} else if setup.Mordred == true && roles.Mordred == "" {
-						player.Role = "Mordred"
-						roles.Mordred = player.ID
-						knownSpies = append(knownSpies, player.ID)
-					} else if setup.Oberon == true && roles.Oberon == "" {
-						player.Role = "Oberon"
-						roles.Oberon = player.ID
-					} else {
-						player.Role = "Spy"
-						knownSpies = append(knownSpies, player.ID)
-					}
-					roles.Spies = append(roles.Spies, player.ID)
-				} else {
-					if setup.Merlin == true && roles.Merlin == "" {
-						player.Role = "Merlin"
-						roles.Merlin = player.ID
-					} else if setup.Percival == true && roles.Percival == "" {
-						player.Role = "Percival"
-						roles.Percival = player.ID
-					} else {
-						player.Role = "Resistance"
-					}
-					roles.Rebels = append(roles.Rebels, player.ID)
-				}
+			err = session.Start(setup)
+			if err != nil {
+				log.Printf("Error starting session: %s", err)
 			}
 
-			log.Printf("Game state: %+v", roles)
-			log.Printf("Player state: %+v", session)
-
-			for _, player := range session.Players {
-				var playerRoleInfo string
-				if roles.Merlin == player.ID {
-					var seenSpies []string
-					for _, spy := range roles.Spies {
-						if spy != roles.Mordred {
-							seenSpies = append(seenSpies, spy)
-						}
-					}
-					playerRoleInfo = fmt.Sprintf("You are Merlin. The following players are spies:\n%s", strings.Join(seenSpies, "\n"))
-				} else if roles.Percival == player.ID {
-					playerRoleInfo = fmt.Sprintf("You are Percival. The following player is Merlin:\n%s", roles.Merlin)
-				} else if roles.Morgana == player.ID {
-					playerRoleInfo = fmt.Sprintf("You are Morgana. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
-				} else if roles.Mordred == player.ID {
-					playerRoleInfo = fmt.Sprintf("You are Mordred. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
-				} else if roles.Oberon == player.ID {
-					playerRoleInfo = fmt.Sprintf("You are Oberon.")
-				} else if roles.Percival == player.ID {
-					playerRoleInfo = fmt.Sprintf("You are Mordred. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
-				} else if player.Role == "Assassin" {
-					playerRoleInfo = fmt.Sprintf("You are the Assassin. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
-				} else if player.Role == "Spy" {
-					playerRoleInfo = fmt.Sprintf("You are a Spy. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
-				} else if player.Role == "Resistance" {
-					playerRoleInfo = fmt.Sprintf("You are a Resistance member.")
-				}
-
-				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: playerRoleInfo})
-
-				session.Setup = setup
-				session.Roles = roles
-			}
-
-			for _, player := range session.Players {
-				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("Game Setup: %+v", setup)})
-			}
-
-			session.State.Picker = rand.Int() % len(session.Players)
-			picker := session.Players[session.State.Picker]
-
-			quest := Quest{
-				Members:   make([]string, roundRules[len(session.State.Quests)][len(session.Players)][0]),
-				Approvals: make(map[string]bool),
-				Successes: make(map[string]bool),
-			}
-			session.State.Quests = append(session.State.Quests, &quest)
-			for _, player := range session.Players {
-				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("It is %s's turn to pick a team of %d", picker.ID, len(quest.Members))})
-			}
+			log.Printf("Session %s started with roles: %+v", session.ID, session.Roles)
 		} else if message.Type == "pick" {
 			picker := session.Players[session.State.Picker]
 			if picker.ID != clientPlayer.ID {
