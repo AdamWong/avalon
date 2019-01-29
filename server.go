@@ -16,10 +16,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var addr = flag.String("addr", "localhost:8080", "http service address")
-
-var upgrader = websocket.Upgrader{CheckOrigin: checkOrigin} // use default options
-
 var sessionInstances = make(map[string]*Session)
 
 var resistanceToSpies = map[int]int{
@@ -40,17 +36,13 @@ var roundRules = []map[int][]int{
 	{5: {3, 1}, 6: {4, 1}, 7: {4, 1}, 8: {5, 1}},
 }
 
-func checkOrigin(r *http.Request) bool {
-	return true
-}
-
 type Session struct {
-	id      string
-	admin   *Player
-	setup   Setup
-	roles   Roles
-	state   State
-	players []*Player
+	ID      string
+	Admin   *Player
+	Setup   Setup
+	Roles   Roles
+	State   State
+	Players []*Player
 }
 
 type Message struct {
@@ -101,13 +93,40 @@ type Quest struct {
 	Successes map[string]bool
 }
 
-type Player struct {
-	ID   string
-	Role string
-	Conn *websocket.Conn
+/* TODO: Handle player disconnects gracefully
+for i, player := range session.Players {
+	err = websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("Game Setup: %+v", setup)})
+	if err != nil {
+		log.Printf("Error writing to player %s: %s", player.ID, err)
+		session.Players = append(session.players[:i], session.players[i+1:]...)
+		if player.Conn == c {
+			return
+		}
+	}
+}
+*/
+
+func main() {
+	rand.Seed(time.Now().UTC().UnixNano())
+	addr := flag.String("addr", "localhost:8080", "http service address")
+	flag.Parse()
+	log.SetFlags(log.LstdFlags)
+	http.HandleFunc("/", home)
+	http.HandleFunc("/client", client)
+	log.Fatal(http.ListenAndServe(*addr, nil))
+}
+
+func home(w http.ResponseWriter, r *http.Request) {
+	clientHTML, err := ioutil.ReadFile("client.html")
+	if err != nil {
+		log.Printf("Error reading client HTML file: %s", err)
+	}
+	homeTemplate := template.Must(template.New("").Parse(string(clientHTML)))
+	homeTemplate.Execute(w, "")
 }
 
 func client(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{}
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Print("upgrade:", err)
@@ -115,7 +134,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 
-	var clientPlayer Player
+	clientPlayer := Player{Conn: c}
 	var session *Session
 	for {
 		_, request, err := c.ReadMessage()
@@ -139,20 +158,11 @@ func client(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Error unmarshalling host connect: %s", err)
 			}
 
-			if _, ok := sessionInstances[connect.Session]; ok {
-				websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("Error creating session %s: already exists", connect.Session)})
+			session, err = clientPlayer.Host(connect.Session, connect.Name)
+			if err != nil {
+				log.Printf("Error unmarshalling host connect: %s", err)
 				return
 			}
-
-			clientPlayer = Player{ID: connect.Name, Conn: c}
-
-			session = &Session{id: connect.Session, admin: &clientPlayer}
-			session.players = append(session.players, &clientPlayer)
-			sessionInstances[connect.Session] = session
-
-			websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("Session %s successfully created.", connect.Session)})
-
-			updatePlayerList(connect.Session)
 		} else if message.Type == "join" {
 			var connect Connect
 			err = json.Unmarshal(message.Data, &connect)
@@ -160,24 +170,13 @@ func client(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Error unmarshalling join connect: %s", err)
 			}
 
-			if _, ok := sessionInstances[connect.Session]; !ok {
-				websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("Error joining session %s: does not exist", connect.Session)})
+			session, err = clientPlayer.Join(connect.Session, connect.Name)
+			if err != nil {
+				log.Printf("Error unmarshalling host connect: %s", err)
 				return
 			}
-
-			clientPlayer = Player{ID: connect.Name, Conn: c}
-			session = sessionInstances[connect.Session]
-			if len(session.players) == 10 {
-				websocket.WriteJSON(c, TextMessage{Type: "text", Text: "Session already has maximum number of players"})
-				return
-			}
-			session.players = append(session.players, &clientPlayer)
-
-			websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("Joined session %s successfully", connect.Session)})
-
-			updatePlayerList(connect.Session)
-		} else if message.Type == "setup" && session != nil && session.admin == &clientPlayer {
-			if len(session.players) < 5 {
+		} else if message.Type == "setup" && session != nil && session.Admin == &clientPlayer {
+			if len(session.Players) < 5 {
 				websocket.WriteJSON(c, TextMessage{Type: "text", Text: "Need at least 5 players to start"})
 				continue
 			}
@@ -187,15 +186,15 @@ func client(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Error unmarshalling setup: %s", err)
 			}
 
-			rand.Shuffle(len(session.players), func(i, j int) {
-				session.players[i], session.players[j] = session.players[j], session.players[i]
+			rand.Shuffle(len(session.Players), func(i, j int) {
+				session.Players[i], session.Players[j] = session.Players[j], session.Players[i]
 			})
 
 			var roles Roles
 
 			var knownSpies []string
-			for i, player := range session.players {
-				if i < resistanceToSpies[len(session.players)] {
+			for i, player := range session.Players {
+				if i < resistanceToSpies[len(session.Players)] {
 					if setup.Merlin == true && roles.Assassin == "" {
 						player.Role = "Assassin"
 						roles.Assassin = player.ID
@@ -233,7 +232,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Game state: %+v", roles)
 			log.Printf("Player state: %+v", session)
 
-			for _, player := range session.players {
+			for _, player := range session.Players {
 				var playerRoleInfo string
 				if roles.Merlin == player.ID {
 					var seenSpies []string
@@ -263,35 +262,28 @@ func client(w http.ResponseWriter, r *http.Request) {
 
 				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: playerRoleInfo})
 
-				session.setup = setup
-				session.roles = roles
+				session.Setup = setup
+				session.Roles = roles
 			}
 
-			for i, player := range session.players {
-				err = websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("Game Setup: %+v", setup)})
-				if err != nil {
-					log.Printf("Error writing to player %s: %s", player.ID, err)
-					session.players = append(session.players[:i], session.players[i+1:]...)
-					if player.Conn == c {
-						return
-					}
-				}
+			for _, player := range session.Players {
+				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("Game Setup: %+v", setup)})
 			}
 
-			session.state.Picker = rand.Int() % len(session.players)
-			picker := session.players[session.state.Picker]
+			session.State.Picker = rand.Int() % len(session.Players)
+			picker := session.Players[session.State.Picker]
 
 			quest := Quest{
-				Members:   make([]string, roundRules[len(session.state.Quests)][len(session.players)][0]),
+				Members:   make([]string, roundRules[len(session.State.Quests)][len(session.Players)][0]),
 				Approvals: make(map[string]bool),
 				Successes: make(map[string]bool),
 			}
-			session.state.Quests = append(session.state.Quests, &quest)
-			for _, player := range session.players {
+			session.State.Quests = append(session.State.Quests, &quest)
+			for _, player := range session.Players {
 				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("It is %s's turn to pick a team of %d", picker.ID, len(quest.Members))})
 			}
 		} else if message.Type == "pick" {
-			picker := session.players[session.state.Picker]
+			picker := session.Players[session.State.Picker]
 			if picker.ID != clientPlayer.ID {
 				websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("It is not your turn to pick a team. Wait for %s to pick a team.", picker.ID)})
 				continue
@@ -302,7 +294,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Error unmarshalling picks: %s", err)
 			}
 
-			currentQuest := session.state.Quests[len(session.state.Quests)-1]
+			currentQuest := session.State.Quests[len(session.State.Quests)-1]
 			if len(picks) != len(currentQuest.Members) {
 				websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("You picked %d members. Please pick %d instead.", len(picks), len(currentQuest.Members))})
 				continue
@@ -310,11 +302,11 @@ func client(w http.ResponseWriter, r *http.Request) {
 			for i, pick := range picks {
 				currentQuest.Members[i] = pick
 			}
-			for _, player := range session.players {
+			for _, player := range session.Players {
 				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("%s has picked %s to go on the next quest. Waiting for everyone to vote.", picker.ID, strings.Join(currentQuest.Members, ", "))})
 			}
 		} else if message.Type == "approve" || message.Type == "reject" {
-			currentQuest := session.state.Quests[len(session.state.Quests)-1]
+			currentQuest := session.State.Quests[len(session.State.Quests)-1]
 			if currentQuest.Leader != "" || currentQuest.Members[0] == "" {
 				websocket.WriteJSON(c, TextMessage{Type: "text", Text: "No team is being voted on."})
 				continue
@@ -327,11 +319,11 @@ func client(w http.ResponseWriter, r *http.Request) {
 			}
 			websocket.WriteJSON(c, TextMessage{Type: "text", Text: "Your team vote was registered"})
 
-			for _, player := range session.players {
+			for _, player := range session.Players {
 				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("%s has put in a vote for the team.", clientPlayer.ID)})
 			}
 
-			if len(currentQuest.Approvals) == len(session.players) {
+			if len(currentQuest.Approvals) == len(session.Players) {
 				var (
 					voteResults []string
 					approvals   int
@@ -348,27 +340,27 @@ func client(w http.ResponseWriter, r *http.Request) {
 					}
 					voteResults = append(voteResults, fmt.Sprintf("%s: %s", playerID, vote))
 				}
-				for _, player := range session.players {
+				for _, player := range session.Players {
 					websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("All players have voted as follows:<br>%s", strings.Join(voteResults, "<br>"))})
 				}
 
 				if approvals > rejections {
-					currentQuest.Leader = session.players[session.state.Picker].ID
-					for _, player := range session.players {
+					currentQuest.Leader = session.Players[session.State.Picker].ID
+					for _, player := range session.Players {
 						websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("The team was approved. They will now go on a quest.")})
 					}
 				} else {
-					session.state.Picker = (session.state.Picker + 1) % len(session.players)
-					picker := session.players[session.state.Picker]
+					session.State.Picker = (session.State.Picker + 1) % len(session.Players)
+					picker := session.Players[session.State.Picker]
 					currentQuest.Members = make([]string, len(currentQuest.Members))
 					currentQuest.Approvals = make(map[string]bool)
-					for _, player := range session.players {
+					for _, player := range session.Players {
 						websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("It is now %s's turn to pick a team of %d", picker.ID, len(currentQuest.Members))})
 					}
 				}
 			}
 		} else if message.Type == "success" || message.Type == "fail" {
-			currentQuest := session.state.Quests[len(session.state.Quests)-1]
+			currentQuest := session.State.Quests[len(session.State.Quests)-1]
 
 			if currentQuest.Leader == "" {
 				websocket.WriteJSON(c, TextMessage{Type: "text", Text: "A team has not been picked yet for this round."})
@@ -393,7 +385,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 							failsNeeded int
 						)
 
-						failsNeeded = roundRules[len(session.state.Quests)][len(session.players)][1]
+						failsNeeded = roundRules[len(session.State.Quests)][len(session.Players)][1]
 
 						for _, success := range currentQuest.Successes {
 							if success {
@@ -404,42 +396,42 @@ func client(w http.ResponseWriter, r *http.Request) {
 						}
 
 						if fails >= failsNeeded {
-							session.state.Fails++
-							for _, player := range session.players {
+							session.State.Fails++
+							for _, player := range session.Players {
 								websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("The quest failed with the following results:<br>%d success(es)<br>%d fail(s)", successes, fails)})
 							}
 						} else {
-							session.state.Successes++
-							for _, player := range session.players {
+							session.State.Successes++
+							for _, player := range session.Players {
 								websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("The quest succeeded with the following results:<br>%d success(es)", successes)})
 							}
 						}
 
-						if session.state.Successes == 1 {
-							for _, player := range session.players {
+						if session.State.Successes == 1 {
+							for _, player := range session.Players {
 								websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("3 quests have failed. The forces of evil have won.")})
 								player.Conn.Close()
 							}
 
-							delete(sessionInstances, session.id)
-						} else if session.state.Fails == 1 {
-							for _, player := range session.players {
+							delete(sessionInstances, session.ID)
+						} else if session.State.Fails == 1 {
+							for _, player := range session.Players {
 								websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("3 quests have succeeded. The forces of good have won.")})
 								player.Conn.Close()
 							}
 
-							delete(sessionInstances, session.id)
+							delete(sessionInstances, session.ID)
 						} else {
 							nextQuest := Quest{
-								Members:   make([]string, roundRules[len(session.state.Quests)+1][len(session.players)][0]),
+								Members:   make([]string, roundRules[len(session.State.Quests)+1][len(session.Players)][0]),
 								Approvals: make(map[string]bool),
 								Successes: make(map[string]bool),
 							}
-							session.state.Quests = append(session.state.Quests, &nextQuest)
+							session.State.Quests = append(session.State.Quests, &nextQuest)
 
-							session.state.Picker = (session.state.Picker + 1) % len(session.players)
-							picker := session.players[session.state.Picker]
-							for _, player := range session.players {
+							session.State.Picker = (session.State.Picker + 1) % len(session.Players)
+							picker := session.Players[session.State.Picker]
+							for _, player := range session.Players {
 								websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("It is now %s's turn to pick a team of %d", picker.ID, len(nextQuest.Members))})
 							}
 						}
@@ -459,11 +451,11 @@ func client(w http.ResponseWriter, r *http.Request) {
 func updatePlayerList(sessionID string) {
 	var playerList []string
 	log.Printf("Updating players %+v", sessionInstances[sessionID])
-	for _, player := range sessionInstances[sessionID].players {
+	for _, player := range sessionInstances[sessionID].Players {
 		playerList = append(playerList, player.ID)
 	}
 
-	for _, player := range sessionInstances[sessionID].players {
+	for _, player := range sessionInstances[sessionID].Players {
 		websocket.WriteJSON(player.Conn, struct {
 			Type    string   `json:"type"`
 			Players []string `json:"players"`
@@ -472,22 +464,4 @@ func updatePlayerList(sessionID string) {
 			Players: playerList,
 		})
 	}
-}
-
-func main() {
-	rand.Seed(time.Now().UTC().UnixNano())
-	flag.Parse()
-	log.SetFlags(0)
-	http.HandleFunc("/client", client)
-	http.HandleFunc("/", home)
-	log.Fatal(http.ListenAndServe(*addr, nil))
-}
-
-func home(w http.ResponseWriter, r *http.Request) {
-	clientHTML, err := ioutil.ReadFile("client.html")
-	if err != nil {
-		log.Printf("Error reading clinet HTML file: %s", err)
-	}
-	homeTemplate := template.Must(template.New("").Parse(string(clientHTML)))
-	homeTemplate.Execute(w, "ws://"+r.Host+"/echo")
 }
