@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <script>
+        function updatePlayerList(playerList) {
+            document.getElementById("players").innerHTML = "";
+            for (var i = 0; i < playerList.length; i++) {
+                var playerName = playerList[i]
+
+                var playerDiv = document.createElement("div");
+
+                var playerBallot = document.createElement("input");
+                playerBallot.id = "player-" + playerName;
+                playerBallot.type = "checkbox";
+                playerBallot.value = playerName;
+
+                playerDiv.appendChild(playerBallot);
+                playerDiv.innerHTML += playerName;
+
+                document.getElementById("players").appendChild(playerDiv);
+            }
+        }
+
+        window.addEventListener("load", function (evt) {
+
+            var output = document.getElementById("output");
+            var input = document.getElementById("input");
+            var ws;
+
+            var print = function (message) {
+                var d = document.createElement("div");
+                d.innerHTML = message;
+                output.appendChild(d);
+            };
+
+            document.getElementById("host").onclick = function (evt) {
+                if (ws) {
+                    return false;
+                }
+                ws = new WebSocket("ws://localhost:8080/client");
+
+                ws.onopen = function (evt) {
+                    print("OPEN");
+
+                    var request = {
+                        "type": "host",
+                        "data": {
+                            "session": document.getElementById("session").value,
+                            "name": document.getElementById("name").value,
+                        },
+                    }
+
+                    console.log("SEND: " + JSON.stringify(request));
+                    ws.send(JSON.stringify(request));
+                }
+                ws.onclose = function (evt) {
+                    print("CLOSE");
+                    ws = null;
+                }
+                ws.onmessage = function (evt) {
+                    console.log("RESPONSE: " + evt.data);
+                    response = JSON.parse(evt.data);
+                    if (response.type == "players") {
+                        updatePlayerList(response.players);
+                    } else if (response.type == "text") {
+                        print(response.text);
+                    }
+                }
+                ws.onerror = function (evt) {
+                    console.log("ERROR: " + evt.data);
+                }
+
+                return false;
+            };
+
+            document.getElementById("join").onclick = function (evt) {
+                if (ws) {
+                    return false;
+                }
+                ws = new WebSocket("ws://localhost:8080/client");
+                ws.onopen = function (evt) {
+                    print("OPEN");
+
+                    var request = {
+                        "type": "join",
+                        "data": {
+                            "session": document.getElementById("session").value,
+                            "name": document.getElementById("name").value,
+                        },
+                    }
+
+                    console.log("SEND: " + JSON.stringify(request));
+                    ws.send(JSON.stringify(request));
+                }
+                ws.onclose = function (evt) {
+                    print("CLOSE");
+                    ws = null;
+                }
+                ws.onmessage = function (evt) {
+                    console.log("RESPONSE: " + evt.data);
+                    response = JSON.parse(evt.data);
+                    if (response.type == "players") {
+                        updatePlayerList(response.players);
+                    } else if (response.type == "text") {
+                        print(response.text);
+                    }
+                }
+                ws.onerror = function (evt) {
+                    console.log("ERROR: " + evt.data);
+                }
+
+                return false;
+            };
+
+            document.getElementById("close").onclick = function (evt) {
+                if (!ws) {
+                    return false;
+                }
+                ws.close();
+                return false;
+            };
+
+            document.getElementById("start").onclick = function (evt) {
+                if (!ws) {
+                    return false;
+                }
+
+                var message = {
+                    "type": "setup",
+                    "data": {
+                        "merlin": document.getElementById("merlin").checked == true,
+                        "percival": document.getElementById("percival").checked == true,
+                        "morgana": document.getElementById("morgana").checked == true,
+                        "mordred": document.getElementById("mordred").checked == true,
+                        "oberon": document.getElementById("oberon").checked == true,
+                    },
+                }
+
+                console.log("SEND: " + JSON.stringify(message));
+                ws.send(JSON.stringify(message));
+                return false;
+            };
+
+            document.getElementById("pick").onclick = function (evt) {
+                if (!ws) {
+                    return false;
+                }
+
+                var picks = [];
+                var playerNodes = document.getElementById("players").childNodes;
+                for (var i = 0; i < playerNodes.length; i++) {
+                    var playerNode = playerNodes[i];
+                    var playerBallot = playerNode.firstElementChild;
+                    if (playerBallot.checked == true) {
+                        picks.push(playerBallot.value);
+                    }
+                }
+
+                var message = {
+                    "type": "pick",
+                    "data": picks,
+                }
+
+                console.log("SEND: " + JSON.stringify(message));
+                ws.send(JSON.stringify(message));
+                return false;
+            };
+
+            document.getElementById("approve").onclick = function (evt) {
+                if (!ws) {
+                    return false;
+                }
+
+                var message = {
+                    "type": "approve",
+                }
+
+                console.log("SEND: " + JSON.stringify(message));
+                ws.send(JSON.stringify(message));
+                return false;
+            };
+
+            document.getElementById("reject").onclick = function (evt) {
+                if (!ws) {
+                    return false;
+                }
+
+                var message = {
+                    "type": "reject",
+                }
+
+                console.log("SEND: " + JSON.stringify(message));
+                ws.send(JSON.stringify(message));
+                return false;
+            };
+
+            document.getElementById("success").onclick = function (evt) {
+                if (!ws) {
+                    return false;
+                }
+
+                var message = {
+                    "type": "success",
+                }
+
+                console.log("SEND: " + JSON.stringify(message));
+                ws.send(JSON.stringify(message));
+                return false;
+            };
+
+            document.getElementById("fail").onclick = function (evt) {
+                if (!ws) {
+                    return false;
+                }
+
+                var message = {
+                    "type": "fail",
+                }
+
+                console.log("SEND: " + JSON.stringify(message));
+                ws.send(JSON.stringify(message));
+                return false;
+            };
+        });
+    </script>
+</head>
+
+<body>
+    <table>
+        <tr>
+            <td valign="top" width="50%">
+                <h1>Session ID</h1>
+                <input type='text' id='session' placeholder='1234'><br>
+                <h1>Name</h1>
+                <input type='text' id='name' placeholder='Your Name'><br>
+                <button id="host">Host</button>
+                <button id="join">Join</button>
+                <button id="close">Close</button>
+                <h1>Roles</h1>
+                <input type='checkbox' id='merlin' value='merlin'>Merlin and Assassin<br>
+                <input type='checkbox' id='percival' value='percival'>Percival<br>
+                <input type='checkbox' id='morgana' value='morgana'>Morgana<br>
+                <input type='checkbox' id='mordred' value='mordred'>Mordred<br>
+                <input type='checkbox' id='oberon' value='oberon'>Oberon<br>
+                <button id="start">Start</button>
+                <h1>Players</h1>
+                <span id="players"></span>
+                <br><br>
+                <button id="pick">Pick</button>
+                <button id="approve">Approve</button>
+                <button id="reject">Reject</button>
+                <button id="success">Success</button>
+                <button id="fail">Fail</button>
+            </td>
+            <td valign="top" width="50%">
+                <div id="output"></div>
+            </td>
+        </tr>
+    </table>
+
+
+
+</body>
+
+</html>
