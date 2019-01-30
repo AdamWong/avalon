@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+
+	"github.com/gorilla/websocket"
 )
 
 var sessionInstances = make(map[string]*Session)
 
-var resistanceToSpies = map[int]int{
+var goodToEvil = map[int]int{
 	5:  2,
 	6:  2,
 	7:  3,
@@ -32,8 +34,8 @@ type Roles struct {
 	Morgana  *Player
 	Mordred  *Player
 	Oberon   *Player
-	Rebels   []*Player
-	Spies    []*Player
+	Good     []*Player
+	Evil     []*Player
 }
 
 func (s *Session) Start(setup Setup) error {
@@ -42,34 +44,34 @@ func (s *Session) Start(setup Setup) error {
 	})
 
 	var (
-		roles      Roles
-		knownSpies []string
-		seenSpies  []string
-		merlin     []string
+		roles     Roles
+		knownEvil []string
+		seenEvil  []string
+		merlin    []string
 	)
 	for i, player := range s.Players {
-		if i < resistanceToSpies[len(s.Players)] {
+		if i < goodToEvil[len(s.Players)] {
 			if setup.Merlin == true && roles.Assassin == nil {
 				roles.Assassin = player
-				knownSpies = append(knownSpies, player.ID)
-				seenSpies = append(seenSpies, player.ID)
+				knownEvil = append(knownEvil, player.ID)
+				seenEvil = append(seenEvil, player.ID)
 			} else if setup.Morgana == true && roles.Morgana == nil {
 				roles.Morgana = player
-				knownSpies = append(knownSpies, player.ID)
-				seenSpies = append(seenSpies, player.ID)
+				knownEvil = append(knownEvil, player.ID)
+				seenEvil = append(seenEvil, player.ID)
 				merlin = append(merlin, player.ID)
 			} else if setup.Mordred == true && roles.Mordred == nil {
 				roles.Mordred = player
-				knownSpies = append(knownSpies, player.ID)
+				knownEvil = append(knownEvil, player.ID)
 			} else if setup.Oberon == true && roles.Oberon == nil {
 				roles.Oberon = player
-				seenSpies = append(seenSpies, player.ID)
+				seenEvil = append(seenEvil, player.ID)
 			} else {
-				knownSpies = append(knownSpies, player.ID)
-				seenSpies = append(seenSpies, player.ID)
+				knownEvil = append(knownEvil, player.ID)
+				seenEvil = append(seenEvil, player.ID)
 			}
-			player.Role = "Spy"
-			roles.Spies = append(roles.Spies, player)
+			player.Role = "Evil"
+			roles.Evil = append(roles.Evil, player)
 		} else {
 			if setup.Merlin == true && roles.Merlin == nil {
 				player.Role = "Merlin"
@@ -79,8 +81,8 @@ func (s *Session) Start(setup Setup) error {
 				player.Role = "Percival"
 				roles.Percival = player
 			}
-			player.Role = "Resistance"
-			roles.Rebels = append(roles.Rebels, player)
+			player.Role = "Good"
+			roles.Good = append(roles.Good, player)
 		}
 	}
 	s.Roles = roles
@@ -88,47 +90,64 @@ func (s *Session) Start(setup Setup) error {
 	for _, player := range s.Players {
 		var roleInfo string
 		if roles.Merlin == player {
-			roleInfo = fmt.Sprintf("You are Merlin. The following players are spies:\n%s", strings.Join(seenSpies, "\n"))
+			roleInfo = fmt.Sprintf("You are Merlin. The following players are Evil:\n%s", strings.Join(seenEvil, "\n"))
 		} else if roles.Percival == player {
 			rand.Shuffle(len(merlin), func(i, j int) {
 				merlin[i], merlin[j] = merlin[j], merlin[i]
 			})
 			roleInfo = fmt.Sprintf("You are Percival. Merlin is among the following players:\n%s", strings.Join(merlin, "\n"))
 		} else if roles.Morgana == player {
-			roleInfo = fmt.Sprintf("You are Morgana. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
+			roleInfo = fmt.Sprintf("You are Morgana. The following players are Evil:\n%s", strings.Join(knownEvil, "\n"))
 		} else if roles.Mordred == player {
-			roleInfo = fmt.Sprintf("You are Mordred. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
+			roleInfo = fmt.Sprintf("You are Mordred. The following players are Evil:\n%s", strings.Join(knownEvil, "\n"))
 		} else if roles.Oberon == player {
 			roleInfo = fmt.Sprintf("You are Oberon.")
 		} else if roles.Percival == player {
-			roleInfo = fmt.Sprintf("You are Mordred. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
+			roleInfo = fmt.Sprintf("You are Mordred. The following players are Evil:\n%s", strings.Join(knownEvil, "\n"))
 		} else if roles.Assassin == player {
-			roleInfo = fmt.Sprintf("You are the Assassin. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
-		} else if player.Role == "Spy" {
-			roleInfo = fmt.Sprintf("You are a Spy. The following players are spies:\n%s", strings.Join(knownSpies, "\n"))
-		} else if player.Role == "Resistance" {
-			roleInfo = fmt.Sprintf("You are a Resistance member.")
+			roleInfo = fmt.Sprintf("You are the Assassin. The following players are Evil:\n%s", strings.Join(knownEvil, "\n"))
+		} else if player.Role == "Evil" {
+			roleInfo = fmt.Sprintf("You are on the side of Evil. The following players are Evil:\n%s", strings.Join(knownEvil, "\n"))
+		} else if player.Role == "Good" {
+			roleInfo = fmt.Sprintf("You are on the side of Good.")
 		}
 
 		player.SendText(roleInfo)
 	}
 
-	for _, player := range s.Players {
-		player.SendText(fmt.Sprintf("The following roles are enabled: %+v", setup))
-	}
+	s.SendGlobalText(fmt.Sprintf("The following roles are enabled: %+v", setup))
 
 	s.State.Picker = rand.Int() % len(s.Players)
 	picker := s.Players[s.State.Picker]
 
 	quest := Quest{
-		Members:   make([]string, roundRules[len(s.State.Quests)][len(s.Players)][0]),
-		Approvals: make(map[string]bool),
-		Successes: make(map[string]bool),
+		Members: make([]string, roundRules[len(s.State.Quests)][len(s.Players)][0]),
 	}
 	s.State.Quests = append(s.State.Quests, &quest)
-	for _, player := range s.Players {
-		player.SendText(fmt.Sprintf("It is %s's turn to pick a team of %d", picker.ID, len(quest.Members)))
-	}
+	s.SendGlobalText(fmt.Sprintf("It is %s's turn to pick a team of %d", picker.ID, len(quest.Members)))
 
 	return nil
+}
+
+func (s *Session) SendGlobalText(message string) {
+	for _, player := range s.Players {
+		player.SendText(message)
+	}
+}
+
+func (s *Session) UpdatePlayerList() {
+	var playerList []string
+	for _, player := range s.Players {
+		playerList = append(playerList, player.ID)
+	}
+
+	for _, player := range s.Players {
+		websocket.WriteJSON(player.Conn, struct {
+			Type    string   `json:"type"`
+			Players []string `json:"players"`
+		}{
+			Type:    "players",
+			Players: playerList,
+		})
+	}
 }

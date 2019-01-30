@@ -103,7 +103,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 
-	clientPlayer := Player{Conn: c}
+	clientPlayer := &Player{Conn: c}
 	var session *Session
 	for {
 		_, request, err := c.ReadMessage()
@@ -116,6 +116,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 		err = json.Unmarshal(request, &message)
 		if err != nil {
 			log.Printf("Error unmarshalling message: %s", err)
+			continue
 		}
 
 		log.Printf("Parsed message: %s", message)
@@ -125,6 +126,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 			err = json.Unmarshal(message.Data, &connect)
 			if err != nil {
 				log.Printf("Error unmarshalling host connect: %s", err)
+				return
 			}
 
 			session, err = clientPlayer.Host(connect.Session, connect.Name)
@@ -137,6 +139,7 @@ func client(w http.ResponseWriter, r *http.Request) {
 			err = json.Unmarshal(message.Data, &connect)
 			if err != nil {
 				log.Printf("Error unmarshalling join connect: %s", err)
+				return
 			}
 
 			session, err = clientPlayer.Join(connect.Session, connect.Name)
@@ -144,9 +147,9 @@ func client(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Error joining session by Player %s: %s", clientPlayer.ID, err)
 				return
 			}
-		} else if message.Type == "start" && session != nil && session.Admin == &clientPlayer {
+		} else if message.Type == "start" && session != nil && session.Admin == clientPlayer {
 			if len(session.Players) < 5 {
-				websocket.WriteJSON(c, TextMessage{Type: "text", Text: "Need at least 5 players to start"})
+				clientPlayer.SendText("Need at least 5 players to start")
 				continue
 			}
 
@@ -154,90 +157,39 @@ func client(w http.ResponseWriter, r *http.Request) {
 			err = json.Unmarshal(message.Data, &setup)
 			if err != nil {
 				log.Printf("Error unmarshalling setup: %s", err)
+				continue
 			}
 
 			err = session.Start(setup)
 			if err != nil {
 				log.Printf("Error starting session: %s", err)
+				continue
 			}
 
 			log.Printf("Session %s started with roles: %+v", session.ID, session.Roles)
 		} else if message.Type == "pick" {
-			picker := session.Players[session.State.Picker]
-			if picker.ID != clientPlayer.ID {
-				websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("It is not your turn to pick a team. Wait for %s to pick a team.", picker.ID)})
-				continue
-			}
 			var picks []string
 			err = json.Unmarshal(message.Data, &picks)
 			if err != nil {
 				log.Printf("Error unmarshalling picks: %s", err)
+				continue
 			}
 
 			currentQuest := session.State.Quests[len(session.State.Quests)-1]
-			if len(picks) != len(currentQuest.Members) {
-				websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("You picked %d members. Please pick %d instead.", len(picks), len(currentQuest.Members))})
+			err = clientPlayer.Pick(session, currentQuest, picks)
+			if err != nil {
+				log.Printf("Error picking team by Player %s: %s", clientPlayer.ID, err)
 				continue
 			}
-			for i, pick := range picks {
-				currentQuest.Members[i] = pick
-			}
-			for _, player := range session.Players {
-				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("%s has picked %s to go on the next quest. Waiting for everyone to vote.", picker.ID, strings.Join(currentQuest.Members, ", "))})
-			}
+
+			session.SendGlobalText(fmt.Sprintf("%s has picked %s to go on the next quest. Waiting for everyone to vote on new team.", clientPlayer.ID, strings.Join(currentQuest.Members, ", ")))
 		} else if message.Type == "approve" || message.Type == "reject" {
 			currentQuest := session.State.Quests[len(session.State.Quests)-1]
-			if currentQuest.Leader != "" || currentQuest.Members[0] == "" {
-				websocket.WriteJSON(c, TextMessage{Type: "text", Text: "No team is being voted on."})
-				continue
-			}
 
 			if message.Type == "approve" {
-				currentQuest.Approvals[clientPlayer.ID] = true
+				clientPlayer.VoteForTeam(session, currentQuest, true)
 			} else {
-				currentQuest.Approvals[clientPlayer.ID] = false
-			}
-			websocket.WriteJSON(c, TextMessage{Type: "text", Text: "Your team vote was registered"})
-
-			for _, player := range session.Players {
-				websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("%s has put in a vote for the team.", clientPlayer.ID)})
-			}
-
-			if len(currentQuest.Approvals) == len(session.Players) {
-				var (
-					voteResults []string
-					approvals   int
-					rejections  int
-				)
-				for playerID, approval := range currentQuest.Approvals {
-					var vote string
-					if approval {
-						vote = "approve"
-						approvals++
-					} else {
-						vote = "reject"
-						rejections++
-					}
-					voteResults = append(voteResults, fmt.Sprintf("%s: %s", playerID, vote))
-				}
-				for _, player := range session.Players {
-					websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("All players have voted as follows:<br>%s", strings.Join(voteResults, "<br>"))})
-				}
-
-				if approvals > rejections {
-					currentQuest.Leader = session.Players[session.State.Picker].ID
-					for _, player := range session.Players {
-						websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("The team was approved. They will now go on a quest.")})
-					}
-				} else {
-					session.State.Picker = (session.State.Picker + 1) % len(session.Players)
-					picker := session.Players[session.State.Picker]
-					currentQuest.Members = make([]string, len(currentQuest.Members))
-					currentQuest.Approvals = make(map[string]bool)
-					for _, player := range session.Players {
-						websocket.WriteJSON(player.Conn, TextMessage{Type: "text", Text: fmt.Sprintf("It is now %s's turn to pick a team of %d", picker.ID, len(currentQuest.Members))})
-					}
-				}
+				clientPlayer.VoteForTeam(session, currentQuest, false)
 			}
 		} else if message.Type == "success" || message.Type == "fail" {
 			currentQuest := session.State.Quests[len(session.State.Quests)-1]
@@ -325,23 +277,5 @@ func client(w http.ResponseWriter, r *http.Request) {
 		} else {
 			websocket.WriteJSON(c, TextMessage{Type: "text", Text: fmt.Sprintf("Action '%s' not allowed", message.Type)})
 		}
-	}
-}
-
-func updatePlayerList(sessionID string) {
-	var playerList []string
-	log.Printf("Updating players %+v", sessionInstances[sessionID])
-	for _, player := range sessionInstances[sessionID].Players {
-		playerList = append(playerList, player.ID)
-	}
-
-	for _, player := range sessionInstances[sessionID].Players {
-		websocket.WriteJSON(player.Conn, struct {
-			Type    string   `json:"type"`
-			Players []string `json:"players"`
-		}{
-			Type:    "players",
-			Players: playerList,
-		})
 	}
 }
